@@ -2,6 +2,87 @@ import { pool } from "../../db/index.js";
 import asyncHandler from "../utils/AsyncHandler.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { hashValue, compareValue } from "../utils/bcrypt.js";
+import {
+  generateRefreshToken,
+  generateAccessToken,
+} from "../utils/jwtTokens.js";
+
+// login user
+const loginUser = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    throw new ApiError(400, "all fields are required");
+  }
+
+  const userQuery = await pool.query("SELECT * FROM users WHERE email = $1", [
+    email,
+  ]);
+
+  if (userQuery.rowCount === 0) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const user = userQuery.rows[0];
+
+  const isMatch = await compareValue(password, user.password);
+  if (!isMatch) {
+    throw new ApiError(401, "Invalid credentials");
+  }
+
+  const accessToken = await generateAccessToken(user.id, user.name, user.email);
+  const refreshToken = await generateRefreshToken(user.id);
+
+  await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [
+    refreshToken,
+    user.id,
+  ]);
+
+  const options = {
+    httpOnly: true,
+    secure: true,
+  };
+
+  res
+    .status(200)
+    .cookie("refreshToken", refreshToken, options)
+    .cookie("accessToken", accessToken, options)
+    .json(
+      new ApiResponse(
+        200,
+        {
+          refreshToken,
+          accessToken,
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            age: user.age,
+          },
+        },
+        "Login successful"
+      )
+    );
+});
+
+// logout user
+
+const logoutUser = asyncHandler(async (req, res) => {
+  await pool.query("UPDATE users SET refresh_token = NULL WHERE id = $1", [
+    req.user.id,
+  ]);
+
+  const options = {
+    httpOnly: true,
+    secure: true,
+  };
+
+  res
+    .clearCookie("refreshToken", options)
+    .clearCookie("accessToken", options)
+    .status(200)
+    .json(new ApiResponse(200, null, "Logout successful"));
+});
 
 // get users
 const getAllUsers = async (req, res) => {
@@ -27,9 +108,10 @@ const addUser = asyncHandler(async (req, res) => {
     throw new ApiError(409, "user already exists");
   }
 
+  const hashedPassword = await hashValue(password);
   const user = await pool.query(
     "INSERT INTO users (name, email, password, age) VALUES ($1, $2, $3, $4) RETURNING  id, name, email, age;",
-    [name, email, password, age]
+    [name, email, hashedPassword, age]
   );
   if (!user.rows[0]) {
     throw new ApiError(500, "err in creating user");
@@ -83,4 +165,4 @@ const removeUser = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, user.rows[0], "user deleted successfully"));
 });
 
-export { getAllUsers, removeUser, updateUser, addUser };
+export { getAllUsers, removeUser, updateUser, addUser, loginUser, logoutUser };
